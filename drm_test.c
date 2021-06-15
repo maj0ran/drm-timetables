@@ -17,15 +17,25 @@
 static const char *dri_path = "/dev/dri/card1";
 
 struct drm_dev;
+struct drm_buffer;
+
+typedef struct {
+  int r;
+  int g;
+  int b;
+} color;
+
 static int drm_find_crtc(int fd, drmModeRes *res, drmModeConnector *conn,
                          struct drm_dev *dev);
-static int drm_create_fb(int fd, struct drm_dev *dev);
+static int drm_create_fb(int fd, struct drm_buffer *dev);
 static int drm_setup(int fd, drmModeRes *res, drmModeConnector *conn,
                      struct drm_dev *dev);
 static int drm_open(const char *node);
 static int drm_prepare(int fd);
 static void drm_draw(void);
 static void drm_cleanup(int fd);
+
+static int flip_buffer(struct drm_dev *dev);
 
 void fatal(char *str) {
   fprintf(stderr, "%s\n", str);
@@ -70,16 +80,15 @@ struct drm_buffer {
 
 struct drm_dev {
   struct drm_dev *next;
-
+  int fd;
   //  uint32_t *buf;
   uint32_t conn_id;
   uint32_t enc_id;
   uint32_t crtc_id;
 
   drmModeModeInfo mode;
-  unsigned int front_buf;
+  uint32_t front_buf;
   struct drm_buffer bufs[2];
-
   drmModeCrtc *saved_crtc;
 };
 
@@ -129,6 +138,7 @@ static int drm_prepare(int fd) {
     /* create new device structure */
     dev = malloc(sizeof(*dev));
     memset(dev, 0, sizeof(*dev));
+    dev->fd = fd;
     dev->conn_id = conn->connector_id;
 
     /* setup this connector */
@@ -174,6 +184,8 @@ int drm_setup(int fd, drmModeRes *res, drmModeConnector *conn,
   memcpy(&dev->mode, &conn->modes[0], sizeof(dev->mode));
   dev->bufs[0].width = conn->modes[0].hdisplay;
   dev->bufs[0].height = conn->modes[0].vdisplay;
+  dev->bufs[1].width = conn->modes[0].hdisplay;
+  dev->bufs[1].height = conn->modes[0].vdisplay;
   fprintf(stderr, "mode for connector %u is %ux%u\n", conn->connector_id,
           dev->bufs[0].width, dev->bufs[0].height);
 
@@ -185,7 +197,15 @@ int drm_setup(int fd, drmModeRes *res, drmModeConnector *conn,
   }
 
   /* create a framebuffer for this CRTC */
-  ret = drm_create_fb(fd, dev);
+  ret = drm_create_fb(fd, &dev->bufs[0]);
+  if (ret) {
+    fprintf(stderr, "cannot create framebuffer for connector %u\n",
+            conn->connector_id);
+    return ret;
+  }
+
+  /* create framebuffer #2 for this CRTC */
+  ret = drm_create_fb(fd, &dev->bufs[1]);
   if (ret) {
     fprintf(stderr, "cannot create framebuffer for connector %u\n",
             conn->connector_id);
@@ -271,7 +291,7 @@ static int drm_find_crtc(int fd, drmModeRes *res, drmModeConnector *conn,
 }
 
 /* TODO: Only create the generic 'dumb buffer' type for now */
-int drm_create_fb(int fd, struct drm_dev *dev) {
+int drm_create_fb(int fd, struct drm_buffer *buf) {
   struct drm_mode_create_dumb creq;
   struct drm_mode_destroy_dumb dreq;
   struct drm_mode_map_dumb mreq;
@@ -279,22 +299,22 @@ int drm_create_fb(int fd, struct drm_dev *dev) {
 
   /* create dumb buffer */
   memset(&creq, 0, sizeof(creq));
-  creq.width = dev->bufs[0].width;
-  creq.height = dev->bufs[0].height;
+  printf("%d, %d\n", buf->width, buf->height);
+  creq.width = buf->width;
+  creq.height = buf->height;
   creq.bpp = 32;
   ret = drmIoctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &creq);
   if (ret < 0) {
     fprintf(stderr, "cannot create dumb buffer (%d): %m\n", errno);
     return -errno;
   }
-  dev->bufs[0].stride = creq.pitch;
-  dev->bufs[0].size = creq.size;
-  dev->bufs[0].handle = creq.handle;
+  buf->stride = creq.pitch;
+  buf->size = creq.size;
+  buf->handle = creq.handle;
 
   /* create framebuffer object for the dumb-buffer */
-  ret = drmModeAddFB(fd, dev->bufs[0].width, dev->bufs[0].height, 24, 32,
-                     dev->bufs[0].stride, dev->bufs[0].handle,
-                     &dev->bufs[0].fb_id);
+  ret = drmModeAddFB(fd, buf->width, buf->height, 24, 32, buf->stride,
+                     buf->handle, &buf->fb_id);
   if (ret) {
     fprintf(stderr, "cannobufs[0].t create framebuffer (%d): %m\n", errno);
     ret = -errno;
@@ -303,7 +323,7 @@ int drm_create_fb(int fd, struct drm_dev *dev) {
 
   /* prepare buffer for memory mapping */
   memset(&mreq, 0, sizeof(mreq));
-  mreq.handle = dev->bufs[0].handle;
+  mreq.handle = buf->handle;
   ret = drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &mreq);
   if (ret) {
     fprintf(stderr, "cannot map dumb buffer (%d): %m\n", errno);
@@ -312,26 +332,41 @@ int drm_create_fb(int fd, struct drm_dev *dev) {
   }
 
   /* perform actual memory mapping */
-  dev->bufs[0].map = mmap(0, dev->bufs[0].size, PROT_READ | PROT_WRITE,
-                          MAP_SHARED, fd, mreq.offset);
-  if (dev->bufs[0].map == MAP_FAILED) {
+  buf->map =
+      mmap(0, buf->size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, mreq.offset);
+  if (buf->map == MAP_FAILED) {
     fprintf(stderr, "cannot mmap dumb buffer (%d): %m\n", errno);
     ret = -errno;
     goto err_fb;
   }
 
   /* clear the framebuffer to 0 */
-  memset(dev->bufs[0].map, 0, dev->bufs[0].size);
+  memset(buf->map, 0, buf->size);
 
   return 0;
 
 err_fb:
-  drmModeRmFB(fd, dev->bufs[0].fb_id);
+  drmModeRmFB(fd, buf->fb_id);
 err_destroy:
   memset(&dreq, 0, sizeof(dreq));
-  dreq.handle = dev->bufs[0].handle;
+  dreq.handle = buf->handle;
   drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
   return ret;
+}
+
+static void drm_destroy_fb(int fd, struct drm_buffer *buf) {
+  struct drm_mode_destroy_dumb dreq;
+
+  /* unmap buffer */
+  munmap(buf->map, buf->size);
+
+  /* delete framebuffer */
+  drmModeRmFB(fd, buf->fb_id);
+
+  /* delete dumb buffer */
+  memset(&dreq, 0, sizeof(dreq));
+  dreq.handle = buf->handle;
+  drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
 }
 
 static void drm_cleanup(int fd) {
@@ -389,19 +424,20 @@ typedef struct {
   int y;
 } vec2;
 
-void plot(struct drm_dev *dev, int x, int y, uint32_t color) {
-  uint32_t off = dev->bufs[0].stride * y + x * 4;
-  *(uint32_t *)&dev->bufs[0].map[off] = color;
+void plot(struct drm_dev *dev, int x, int y, color color) {
+  uint32_t off = dev->bufs[dev->front_buf ^ 1].stride * y + x * 4;
+  *(uint32_t *)&dev->bufs[dev->front_buf ^ 1].map[off] =
+      (color.r << 16) | (color.g << 8) | color.b;
 }
 
 void clear(struct drm_dev *dev) {
   uint32_t w = dev->bufs[dev->front_buf].width;
   uint32_t h = dev->bufs[dev->front_buf].height;
 
-  memset(dev->bufs[0].map, 0, w * h * 4);
+  memset(dev->bufs[dev->front_buf ^ 1].map, 0, w * h * 4);
 }
 
-void draw_line(struct drm_dev *dev, vec2 p0, vec2 p1) {
+void draw_line(struct drm_dev *dev, vec2 p0, vec2 p1, color col) {
   vec2 d;
   d.x = abs(p1.x - p0.x);
   int sx = p0.x < p1.x ? 1 : -1;
@@ -410,7 +446,7 @@ void draw_line(struct drm_dev *dev, vec2 p0, vec2 p1) {
   int err = d.x + d.y;
   int e2;
   while (1) {
-    plot(dev, p0.x, p0.y, RED);
+    plot(dev, p0.x, p0.y, col);
     if (p0.x == p1.x && p0.y == p1.y)
       break;
     e2 = 2 * err;
@@ -425,17 +461,17 @@ void draw_line(struct drm_dev *dev, vec2 p0, vec2 p1) {
   }
 }
 
-void draw_ellipse(struct drm_dev *dev, vec2 c, int a, int b) {
+void draw_ellipse(struct drm_dev *dev, vec2 c, int a, int b, color col) {
   vec2 d;
   d.x = 0;
   d.y = b;
   int64_t a2 = a * a, b2 = b * b;
   int64_t err = b2 - (2 * b - 1) * a2, e2;
   do {
-    plot(dev, c.x + d.x, c.y + d.y, 0xFFFFFF);
-    plot(dev, c.x - d.x, c.y + d.y, 0x0077FF);
-    plot(dev, c.x - d.x, c.y - d.y, RED);
-    plot(dev, c.x + d.x, c.y - d.y, 0x00FF00);
+    plot(dev, c.x + d.x, c.y + d.y, col);
+    plot(dev, c.x - d.x, c.y + d.y, col);
+    plot(dev, c.x - d.x, c.y - d.y, col);
+    plot(dev, c.x + d.x, c.y - d.y, col);
 
     e2 = 2 * err;
     if (e2 < (2 * d.x + 1) * b2) {
@@ -449,8 +485,8 @@ void draw_ellipse(struct drm_dev *dev, vec2 c, int a, int b) {
   } while (d.y >= 0);
 
   while (d.x++ < a) {
-    plot(dev, c.x + d.x, c.y, RED);
-    plot(dev, c.x - d.x, c.y, RED);
+    plot(dev, c.x + d.x, c.y, col);
+    plot(dev, c.x - d.x, c.y, col);
   }
 }
 
@@ -460,56 +496,49 @@ void draw_tt(struct drm_dev *dev, vec2 pos, int r, size_t max_points) {
   vec2 p2;
   double a = (M_PI * 2) / max_points;
   double step = 2.0;
+  color c;
+  srand(time(NULL));
+  bool r_up, g_up, b_up;
+  c.r = rand() % 0xff;
+  c.g = rand() % 0xff;
+  c.b = rand() % 0xff;
+  r_up = g_up = b_up = true;
   while (step <= 100.0) {
-    draw_ellipse(dev, pos, r, r);
+    clear(dev);
+    c.r = next_color(&r_up, c.r, 20);
+    c.g = next_color(&g_up, c.g, 10);
+    c.b = next_color(&b_up, c.b, 5);
+    draw_ellipse(dev, pos, r, r, c);
     for (size_t i = 0; i < max_points; i++) {
       p1.x = pos.x + r * cos(a * i);
       p1.y = pos.y + r * sin(a * i);
 
       p2.x = pos.x + r * cos(a * ((int)(i * step) % max_points));
       p2.y = pos.y + r * sin(a * ((int)(i * step) % max_points));
-      draw_line(dev, p1, p2);
+      draw_line(dev, p1, p2, c);
     }
-    clear(dev);
-    step += 0.1;
+    flip_buffer(dev);
+    step += 0.01;
   }
 }
 
-static void drm_draw(void) {
-  uint8_t r, g, b;
-  bool r_up, g_up, b_up;
-  unsigned int i, y, x, off;
-  struct drm_dev *iter;
-
-  srand(time(NULL));
-  r = rand() % 0xff;
-  g = rand() % 0xff;
-  b = rand() % 0xff;
-  r_up = g_up = b_up = true;
-
-  for (i = 0; i < 50; ++i) {
-    r = next_color(&r_up, r, 20);
-    g = next_color(&g_up, g, 10);
-    b = next_color(&b_up, b, 5);
-
-    for (iter = dev_list; iter; iter = iter->next) {
-      for (y = 0; y < iter->bufs[0].height; ++y) {
-        for (x = 0; x < iter->bufs[0].width; ++x) {
-          off = iter->bufs[0].stride * y + x * 4;
-          // *(uint32_t *)&iter->bufs[0].map[off] = 0xFF0000;
-          plot(iter, x, y, (r << 16) | (g << 8) | b);
-        }
-      }
-    }
-
-    usleep(1e6 * 2);
-  }
+int flip_buffer(struct drm_dev *dev) {
+  int ret =
+      drmModeSetCrtc(dev->fd, dev->crtc_id, dev->bufs[dev->front_buf ^ 1].fb_id,
+                     0, 0, &dev->conn_id, 1, &dev->mode);
+  if (ret)
+    fprintf(stderr, "cannot flip CRTC for connector %u (%d): %m\n",
+            dev->conn_id, errno);
+  else
+    dev->front_buf ^= 1;
+  return 0;
 }
 
 int main(int argc, char **argv) {
   int ret, fd;
   const char *card;
   struct drm_dev *iter;
+  struct drm_buffer *buf;
 
   /* check which DRM device to open */
   if (argc > 1)
@@ -532,8 +561,9 @@ int main(int argc, char **argv) {
   /* perform actual modesetting on each found connector+CRTC */
   for (iter = dev_list; iter; iter = iter->next) {
     iter->saved_crtc = drmModeGetCrtc(fd, iter->crtc_id);
-    ret = drmModeSetCrtc(fd, iter->crtc_id, iter->bufs[0].fb_id, 0, 0,
-                         &iter->conn_id, 1, &iter->mode);
+    buf = &iter->bufs[iter->front_buf];
+    ret = drmModeSetCrtc(fd, iter->crtc_id, buf->fb_id, 0, 0, &iter->conn_id, 1,
+                         &iter->mode);
     if (ret)
       fprintf(stderr, "cannot set CRTC for connector %u (%d): %m\n",
               iter->conn_id, errno);
@@ -549,12 +579,8 @@ int main(int argc, char **argv) {
     vec2 p2;
     p2.x = 3840 - 1;
     p2.y = 2160 - 1;
-    // drm_draw();
-    //draw_ellipse(iter, cpos, 1000, 500);
-    //        draw_line(iter, p1, p2);
-     draw_tt(iter, cpos, 1000, 200);
+    draw_tt(iter, cpos, 1000, 250);
   }
-  usleep(1e6 * 3);
 
   /* cleanup everything */
   drm_cleanup(fd);
