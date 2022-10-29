@@ -9,10 +9,13 @@
 
 #include <math.h>
 
-#include "draw.h"
+#include <draw.h>
 
 /* Drawing Helper Functions */
 
+/* Get a "next" color, that is, visually close to the previous color
+ * to ensure a smooth gradually color-change
+ */
 static uint8_t next_color(bool *up, uint8_t cur, unsigned int mod) {
   uint8_t next;
 
@@ -25,18 +28,8 @@ static uint8_t next_color(bool *up, uint8_t cur, unsigned int mod) {
   return next;
 }
 
-int flip_buffer(struct drm_dev *dev) {
-  int ret =
-      drmModeSetCrtc(dev->fd, dev->crtc_id, dev->bufs[dev->front_buf ^ 1].fb_id,
-                     0, 0, &dev->conn_id, 1, &dev->mode);
-  if (ret)
-    fprintf(stderr, "cannot flip CRTC for connector %u (%d): %m\n",
-            dev->conn_id, errno);
-  else
-    dev->front_buf ^= 1;
-  return 0;
-}
-
+/* Set pixel at (x,y) coordinate to a given color
+ */
 void plot(struct drm_dev *dev, int x, int y, color color) {
   uint32_t off = dev->bufs[dev->front_buf ^ 1].stride * y + x * 4;
   *(uint32_t *)&dev->bufs[dev->front_buf ^ 1].map[off] =
@@ -50,7 +43,9 @@ void clear(struct drm_dev *dev) {
   memset(dev->bufs[dev->front_buf ^ 1].map, 0, w * h * 4);
 }
 
-/* Bresenham Algorithm to draw a line */
+/* Bresenham Algorithm to draw a rasterized line from one 
+ * point to another 
+ */
 void draw_line(struct drm_dev *dev, vec2 p0, vec2 p1, color col) {
   vec2 d;
   d.x = abs(p1.x - p0.x);

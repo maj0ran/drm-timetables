@@ -14,48 +14,9 @@
 
 #include <math.h>
 
-#include "utils.h"
-#include "draw.h"
-#include "drm_helper.h"
-
-static int drm_open(struct drm_manager *drm, const char *node);
-static int drm_prepare(struct drm_manager *drm);
-static void drm_cleanup(struct drm_manager *drm);
-
-int drm_open(struct drm_manager *drm, const char *path) {
-  int fd, flags;
-  uint64_t has_dumb;
-
-  fd = eopen(path, O_RDWR);
-
-  /* set FD_CLOEXEC flag */
-  if ((flags = fcntl(fd, F_GETFD)) < 0 ||
-      fcntl(fd, F_SETFD, flags | FD_CLOEXEC) < 0)
-    fatal("fcntl FD_CLOEXEC failed");
-
-  /* check capability */
-  if (drmGetCap(fd, DRM_CAP_DUMB_BUFFER, &has_dumb) < 0 || !has_dumb) {
-    fprintf(stderr, "drm device '%s' does not support dumb buffers\n", path);
-    return -ENOTSUP;
-  }
-  drm->dri_fd = fd;
-  return fd;
-}
-
-static void drm_destroy_fb(int fd, struct drm_buf *buf) {
-  struct drm_mode_destroy_dumb dreq;
-
-  /* unmap buffer */
-  munmap(buf->map, buf->size);
-
-  /* delete framebuffer */
-  drmModeRmFB(fd, buf->fb_id);
-
-  /* delete dumb buffer */
-  memset(&dreq, 0, sizeof(dreq));
-  dreq.handle = buf->handle;
-  drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
-}
+#include <utils.h>
+#include <draw.h>
+#include <drm_helper.h>
 
 int main(int argc, char **argv) {
   int ret, dri_fd;

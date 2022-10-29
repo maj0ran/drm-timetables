@@ -3,12 +3,7 @@
 #include <stdint.h>
 #include <sys/mman.h>
 
-#include "utils.h"
-
-void fatal(char *str) {
-  fprintf(stderr, "%s\n", str);
-  exit(EXIT_FAILURE);
-}
+#include <utils.h>
 
 void error(char *str) {
   perror(str);

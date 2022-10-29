@@ -1,10 +1,11 @@
-#include "drm_helper.h"
-#include "utils.h"
+#include <drm_helper.h>
+#include <utils.h>
 
 #include <errno.h>
 #include <malloc.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <fcntl.h>
 
 int valid_connector_id = 0;
 
@@ -142,7 +143,7 @@ static int drm_find_crtc(struct drm_manager *drm,
     if (enc->crtc_id) {
       crtc = enc->crtc_id;
       for (iter = drm->dev_list; iter; iter = iter->next) {
-        if (iter->crtc_id == crtc) {
+        if (iter->crtc_id == (uint32_t)crtc) {
           crtc = -1;
           break;
         }
@@ -180,7 +181,7 @@ static int drm_find_crtc(struct drm_manager *drm,
       /* check that no other device already uses this CRTC */
       crtc = res->crtcs[j];
       for (iter = drm->dev_list; iter; iter = iter->next) {
-        if (iter->crtc_id == crtc) {
+        if (iter->crtc_id == (uint32_t)crtc) {
           crtc = -1;
           break;
         }
@@ -264,6 +265,18 @@ err_destroy:
   return ret;
 }
 
+int flip_buffer(struct drm_dev *dev) {
+  int ret =
+      drmModeSetCrtc(dev->fd, dev->crtc_id, dev->bufs[dev->front_buf ^ 1].fb_id,
+                     0, 0, &dev->conn_id, 1, &dev->mode);
+  if (ret)
+    fprintf(stderr, "cannot flip CRTC for connector %u (%d): %m\n",
+            dev->conn_id, errno);
+  else
+    dev->front_buf ^= 1;
+  return 0;
+}
+
 void drm_cleanup(struct drm_manager *drm) {
   struct drm_dev *iter;
   struct drm_mode_destroy_dumb dreq;
@@ -294,4 +307,104 @@ void drm_cleanup(struct drm_manager *drm) {
     free(iter);
   }
   drmModeFreeResources(drm->res);
+}
+
+int drm_open(struct drm_manager *drm, const char *path) {
+  int fd, flags;
+  uint64_t has_dumb;
+
+  fd = eopen(path, O_RDWR);
+
+  /* set FD_CLOEXEC flag */
+  if ((flags = fcntl(fd, F_GETFD)) < 0 ||
+      fcntl(fd, F_SETFD, flags | FD_CLOEXEC) < 0)
+    error("fcntl FD_CLOEXEC failed");
+
+  /* check capability */
+  if (drmGetCap(fd, DRM_CAP_DUMB_BUFFER, &has_dumb) < 0 || !has_dumb) {
+    fprintf(stderr, "drm device '%s' does not support dumb buffers\n", path);
+    return -ENOTSUP;
+  }
+  drm->dri_fd = fd;
+  return fd;
+}
+
+void drm_destroy_fb(int fd, struct drm_buf *buf) {
+  struct drm_mode_destroy_dumb dreq;
+
+  /* unmap buffer */
+  munmap(buf->map, buf->size);
+
+  /* delete framebuffer */
+  drmModeRmFB(fd, buf->fb_id);
+
+  /* delete dumb buffer */
+  memset(&dreq, 0, sizeof(dreq));
+  dreq.handle = buf->handle;
+  drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
+}
+
+void connector_find_mode(struct drm_manager *drm, struct connector *c) {
+  drmModeConnector *connector;
+  int i, j;
+  drmModeRes *resources = drm->res;
+  /* First, find the connector & mode */
+  c->mode = NULL;
+  for (i = 0; i < resources->count_connectors; i++) {
+    connector = drmModeGetConnector(drm->dri_fd, resources->connectors[i]);
+
+    if (!connector) {
+      fprintf(stderr, "could not get connector %i: %s\n",
+              resources->connectors[i], strerror(errno));
+      drmModeFreeConnector(connector);
+      continue;
+    }
+
+    if (!connector->count_modes) {
+      drmModeFreeConnector(connector);
+      continue;
+    }
+
+    if (connector->connector_id != c->id) {
+      drmModeFreeConnector(connector);
+      continue;
+    }
+
+    for (j = 0; j < connector->count_modes; j++) {
+      c->mode = &connector->modes[j];
+      if (!strcmp(c->mode->name, c->mode_str))
+        break;
+    }
+
+    /* Found it, break out */
+    if (c->mode)
+      break;
+
+    drmModeFreeConnector(connector);
+  }
+
+  if (!c->mode) {
+    fprintf(stderr, "failed to find mode \"%s\"\n", c->mode_str);
+    return;
+  }
+
+  /* Now get the encoder */
+  for (i = 0; i < resources->count_encoders; i++) {
+    c->encoder = drmModeGetEncoder(drm->dri_fd, resources->encoders[i]);
+
+    if (!c->encoder) {
+      fprintf(stderr, "could not get encoder %i: %s\n", resources->encoders[i],
+              strerror(errno));
+      drmModeFreeEncoder(c->encoder);
+      continue;
+    }
+
+    if (c->encoder->encoder_id == connector->encoder_id)
+      break;
+
+    drmModeFreeEncoder(c->encoder);
+  }
+
+  if (c->crtc == -1)
+    c->crtc = c->encoder->crtc_id;
 }
