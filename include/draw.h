@@ -8,7 +8,6 @@ typedef struct {
   int b;
 } color;
 
-
 typedef struct {
   int x;
   int y;
@@ -19,4 +18,3 @@ void plot(struct drm_dev *dev, int x, int y, color color);
 void draw_line(struct drm_dev *dev, vec2 p0, vec2 p1, color col);
 void draw_ellipse(struct drm_dev *dev, vec2 c, int a, int b, color col);
 void draw_tt(struct drm_dev *dev, vec2 pos, int r, size_t max_points);
-

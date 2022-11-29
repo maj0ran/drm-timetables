@@ -1,13 +1,12 @@
+#include <stdint.h>
 #include <stdlib.h>
 #include <sys/fcntl.h>
-#include <stdint.h>
 #include <sys/mman.h>
 
 #include <utils.h>
 
 void error(char *str) {
   perror(str);
-  exit(EXIT_FAILURE);
 }
 
 int eopen(const char *path, int flag) {

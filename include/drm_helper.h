@@ -1,17 +1,16 @@
 #pragma once
 
 #include <errno.h>
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
 typedef struct conn_list {
-  drmModeConnector *conn;
   struct conn_list *next;
+  drmModeConnector *conn;
 } conn_list;
-
 
 struct drm_buf {
   uint32_t fb_id;
@@ -25,9 +24,7 @@ struct drm_buf {
 };
 
 struct drm_dev {
-  struct drm_dev *next;
   int fd;
-  //  uint32_t *buf;
   uint32_t conn_id;
   uint32_t enc_id;
   uint32_t crtc_id;
@@ -39,12 +36,14 @@ struct drm_dev {
 };
 
 typedef struct drm_dev_list {
-  struct drm_dev *dev;
   struct drm_dev_list *next;
-};
+  struct drm_dev *dev;
+} drm_dev_list;
+
+int drm_dev_list_append(drm_dev_list **head, struct drm_dev *dev);
 
 struct drm_manager {
-  struct drm_dev *dev_list;
+  drm_dev_list *devs;
   conn_list *conns;
   drmModeConnector *activeConn;
   int dri_fd;
@@ -75,5 +74,3 @@ int drm_prepare(struct drm_manager *drm);
 void drm_cleanup(struct drm_manager *drm);
 void connector_find_mode(struct drm_manager *drm, struct connector *c);
 int flip_buffer(struct drm_dev *dev);
-
-

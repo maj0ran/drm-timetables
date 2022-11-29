@@ -1,31 +1,57 @@
+#include <asm-generic/errno-base.h>
 #include <drm_helper.h>
+#include <stdlib.h>
 #include <utils.h>
 
 #include <errno.h>
+#include <fcntl.h>
 #include <malloc.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <fcntl.h>
+
+int drm_dev_list_append(drm_dev_list **head, struct drm_dev *dev) {
+  drm_dev_list *node = malloc(sizeof(drm_dev_list));
+  if (node == NULL) {
+    ERROR("could not allocate memory for drm_dev_list: %d", errno);
+    return errno;
+  }
+  node->dev = dev;
+  node->next = NULL;
+
+  if (*head == NULL) {
+    LOG("initialized empty list at %p\n", (void*)node);
+    *head = node;
+    return EXIT_SUCCESS;;
+  }
+
+  drm_dev_list *current = *head;
+  while (current->next != NULL) {
+    current = current->next;
+  }
+  LOG("appending node to list");
+  current->next = node;
+
+  return EXIT_SUCCESS;
+}
 
 int valid_connector_id = 0;
 
 void add_conn(conn_list *list, drmModeConnector *conn) {
-    conn_list *current = list;
-    while(current->next != NULL) {
-        current = current->next;
-    }
-    current->next->conn = conn;
-    current->next->next = NULL;
+  conn_list *current = list;
+  while (current->next != NULL) {
+    current = current->next;
+  }
+  current->next->conn = conn;
+  current->next->next = NULL;
 }
 
-static int drm_find_crtc(struct drm_manager *drm,
-                         struct drm_dev *dev,
+static int drm_find_crtc(struct drm_manager *drm, struct drm_dev *dev,
                          drmModeConnector *conn);
 
 static int drm_create_fb(struct drm_dev *dev, struct drm_buf *buf);
 
 void drm_manager_init(struct drm_manager *drm) {
-  drm->dev_list = NULL;
+  drm->devs = NULL;
   drm->res = NULL;
 }
 
@@ -70,15 +96,14 @@ int registerConnectors(struct drm_manager *drm) {
     /* success */
     /* free connector data and link device into global list */
     drmModeFreeConnector(conn);
-    dev->next = drm->dev_list;
-    drm->dev_list = dev;
+    drm_dev_list_append(&drm->devs, dev);
   }
 
   return 0;
 }
 
-int drm_setup_dev(struct drm_manager *drm,
-                  struct drm_dev *dev, drmModeConnector *conn) {
+int drm_setup_dev(struct drm_manager *drm, struct drm_dev *dev,
+                  drmModeConnector *conn) {
   int ret;
   /* check if a monitor is connected */
   if (conn->connection != DRM_MODE_CONNECTED) {
@@ -91,7 +116,7 @@ int drm_setup_dev(struct drm_manager *drm,
     fprintf(stderr, "no valid mode for connector %u\n", conn->connector_id);
     return -EFAULT;
   }
- 
+
   /* copy the mode information into our device buffer structure */
   /* TODO: this is always first mode here. selection would be nice
    */
@@ -124,14 +149,14 @@ int drm_setup_dev(struct drm_manager *drm,
             conn->connector_id);
     return ret;
   }
+
   return 0;
 }
 
-static int drm_find_crtc(struct drm_manager *drm,
-                         struct drm_dev *dev, drmModeConnector *conn) {
+static int drm_find_crtc(struct drm_manager *drm, struct drm_dev *dev,
+                         drmModeConnector *conn) {
   drmModeEncoder *enc;
   int32_t crtc;
-  struct drm_dev *iter;
 
   /* first try the currently connected encoder+crtc */
   if (conn->encoder_id)
@@ -142,8 +167,8 @@ static int drm_find_crtc(struct drm_manager *drm,
   if (enc) {
     if (enc->crtc_id) {
       crtc = enc->crtc_id;
-      for (iter = drm->dev_list; iter; iter = iter->next) {
-        if (iter->crtc_id == (uint32_t)crtc) {
+      for (struct drm_dev_list *iter = drm->devs; iter != NULL; iter = iter->next) {
+        if (iter->dev->crtc_id == (uint32_t)crtc) {
           crtc = -1;
           break;
         }
@@ -180,8 +205,9 @@ static int drm_find_crtc(struct drm_manager *drm,
 
       /* check that no other device already uses this CRTC */
       crtc = res->crtcs[j];
-      for (iter = drm->dev_list; iter; iter = iter->next) {
-        if (iter->crtc_id == (uint32_t)crtc) {
+      for (struct drm_dev_list *iter = drm->devs; iter; iter = iter->next) {
+        struct drm_dev *dev = iter->dev;
+        if (dev->crtc_id == (uint32_t)crtc) {
           crtc = -1;
           break;
         }
@@ -243,8 +269,8 @@ int drm_create_fb(struct drm_dev *dev, struct drm_buf *buf) {
   }
 
   /* perform actual memory mapping */
-  buf->map =
-      mmap(0, buf->size, PROT_READ | PROT_WRITE, MAP_SHARED, dev->fd, mreq.offset);
+  buf->map = mmap(0, buf->size, PROT_READ | PROT_WRITE, MAP_SHARED, dev->fd,
+                  mreq.offset);
   if (buf->map == MAP_FAILED) {
     fprintf(stderr, "cannot mmap dumb buffer (%d): %m\n", errno);
     ret = -errno;
@@ -281,30 +307,32 @@ void drm_cleanup(struct drm_manager *drm) {
   struct drm_dev *iter;
   struct drm_mode_destroy_dumb dreq;
 
-  while (drm->dev_list) {
+  drm_dev_list *devs = drm->devs;
+  while (devs != NULL) {
+    struct drm_dev *dev = devs->dev;
     /* remove from global list */
-    iter = drm->dev_list;
-    drm->dev_list = iter->next;
+    drm->devs = devs->next;
 
     /* restore saved CRTC configuration */
-    drmModeSetCrtc(drm->dri_fd, iter->saved_crtc->crtc_id, iter->saved_crtc->buffer_id,
-                   iter->saved_crtc->x, iter->saved_crtc->y, &iter->conn_id, 1,
-                   &iter->saved_crtc->mode);
-    drmModeFreeCrtc(iter->saved_crtc);
+    drmModeSetCrtc(drm->dri_fd, dev->saved_crtc->crtc_id,
+                   dev->saved_crtc->buffer_id, dev->saved_crtc->x,
+                   dev->saved_crtc->y, &dev->conn_id, 1,
+                   &dev->saved_crtc->mode);
+    drmModeFreeCrtc(dev->saved_crtc);
 
     /* unmap buffer */
-    munmap(iter->bufs[0].map, iter->bufs[0].size);
+    munmap(dev->bufs[0].map, dev->bufs[0].size);
 
     /* delete framebuffer */
-    drmModeRmFB(drm->dri_fd, iter->bufs[0].fb_id);
+    drmModeRmFB(drm->dri_fd, dev->bufs[0].fb_id);
 
     /* delete dumb buffer */
     memset(&dreq, 0, sizeof(dreq));
-    dreq.handle = iter->bufs[0].handle;
+    dreq.handle = dev->bufs[0].handle;
     drmIoctl(drm->dri_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
 
     /* free allocated memory */
-    free(iter);
+    free(dev);
   }
   drmModeFreeResources(drm->res);
 }
@@ -313,20 +341,24 @@ int drm_open(struct drm_manager *drm, const char *path) {
   int fd, flags;
   uint64_t has_dumb;
 
+  LOG("trying card: %s\n", path);
+
   fd = eopen(path, O_RDWR);
+  if (fd <= 0)
+    return EXIT_FAILURE;
 
   /* set FD_CLOEXEC flag */
   if ((flags = fcntl(fd, F_GETFD)) < 0 ||
       fcntl(fd, F_SETFD, flags | FD_CLOEXEC) < 0)
-    error("fcntl FD_CLOEXEC failed");
+    ERROR("fcntl FD_CLOEXEC failed");
 
   /* check capability */
   if (drmGetCap(fd, DRM_CAP_DUMB_BUFFER, &has_dumb) < 0 || !has_dumb) {
-    fprintf(stderr, "drm device '%s' does not support dumb buffers\n", path);
+    ERROR("drm device '%s' does not support dumb buffers\n", path);
     return -ENOTSUP;
   }
   drm->dri_fd = fd;
-  return fd;
+  return EXIT_SUCCESS;
 }
 
 void drm_destroy_fb(int fd, struct drm_buf *buf) {

@@ -1,3 +1,8 @@
+/*
+ * Drawing Helper Functions.
+ * Includes functions to draw pixel, line and cirlce onto the DRM buffer
+ */
+
 #include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -11,7 +16,6 @@
 
 #include <draw.h>
 
-/* Drawing Helper Functions */
 
 /* Get a "next" color, that is, visually close to the previous color
  * to ensure a smooth gradually color-change
@@ -43,8 +47,8 @@ void clear(struct drm_dev *dev) {
   memset(dev->bufs[dev->front_buf ^ 1].map, 0, w * h * 4);
 }
 
-/* Bresenham Algorithm to draw a rasterized line from one 
- * point to another 
+/* Bresenham Algorithm to draw a rasterized line from one
+ * point to another
  */
 void draw_line(struct drm_dev *dev, vec2 p0, vec2 p1, color col) {
   vec2 d;
@@ -115,7 +119,7 @@ void draw_tt(struct drm_dev *dev, vec2 pos, int r, size_t max_points) {
   c.g = rand() % 0xff;
   c.b = rand() % 0xff;
   r_up = g_up = b_up = true;
-  while (step <= 50) {
+  while (step <= 200) {
     clear(dev);
     c.r = next_color(&r_up, c.r, 20);
     c.g = next_color(&g_up, c.g, 10);
@@ -130,6 +134,6 @@ void draw_tt(struct drm_dev *dev, vec2 pos, int r, size_t max_points) {
       draw_line(dev, p1, p2, c);
     }
     flip_buffer(dev);
-    step += 0.01;
+    step += 0.005;
   }
 }
